@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: agenda-educativa-java
+    runtime: docker
+    plan: free
+    healthCheckPath: /salud
+    autoDeployTrigger: commit
