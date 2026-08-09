@@ -8,6 +8,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -16,7 +17,7 @@ public class AgendaWeb {
     static final Actividad[] actividades = new Actividad[100];
     static final Horario[][] horarios = new Horario[5][6];
     static final String[] DIAS = {"Lunes", "Martes", "Miércoles", "Jueves", "Viernes"};
-    static final String[] BLOQUES = {"07:00-08:00", "08:00-09:00", "09:00-10:00",
+    static final String[] BLOQUES_ANTERIORES = {"07:00-08:00", "08:00-09:00", "09:00-10:00",
             "10:00-11:00", "11:00-12:00", "12:00-13:00"};
     static final File DATOS = new File("data"), ARCHIVO_A = new File(DATOS, "actividades.txt");
     static final File ARCHIVO_H = new File(DATOS, "horarios.txt");
@@ -147,12 +148,13 @@ public class AgendaWeb {
     static String vistaHorario() {
         StringBuilder filas = new StringBuilder();
         for (int b = 0; b < 6; b++) {
-            filas.append("<tr><th>").append(BLOQUES[b]).append("</th>");
+            filas.append("<tr><th>Bloque ").append(b + 1).append("</th>");
             for (int d = 0; d < 5; d++) {
                 Horario h = horarios[d][b];
                 filas.append("<td class='").append(h == null ? "libre" : "ocupado").append("'>");
                 if (h == null) filas.append("Disponible");
-                else filas.append("<strong>").append(esc(h.materia)).append("</strong>")
+                else filas.append("<span class='hora-bloque'>").append(h.inicio).append("–").append(h.fin)
+                        .append("</span><strong>").append(esc(h.materia)).append("</strong>")
                         .append("<form method='post' action='/horario/eliminar'><input type='hidden' name='dia' value='")
                         .append(d).append("'><input type='hidden' name='bloque' value='").append(b)
                         .append("'><button class='enlace-peligro'>Quitar</button></form>");
@@ -164,11 +166,13 @@ public class AgendaWeb {
                 <article class='tarjeta'><h2>Agregar bloque académico</h2>
                 <form method='post' action='/horario/guardar' class='formulario horario-form'>
                 <label>Materia<input name='materia' required minlength='2'></label>
-                <label>Día<select name='dia'>%s</select></label><label>Bloque<select name='bloque'>%s</select></label>
+                <label>Día<select name='dia'>%s</select></label>
+                <label>Hora inicial<input type='time' name='inicio' required value='07:00'></label>
+                <label>Hora final<input type='time' name='fin' required value='08:00'></label>
                 <button>Guardar bloque</button></form></article>
-                <article class='tarjeta'><h2>Arreglo bidimensional Horario[5][6]</h2><div class='tabla'>
-                <table class='horario'><thead><tr><th>Hora</th>%s</tr></thead><tbody>%s</tbody></table></div></article>
-                """.formatted(opcionesIndice(DIAS), opcionesIndice(BLOQUES), encabezados(DIAS), filas);
+                <article class='tarjeta'><h2>Arreglo bidimensional Horario[5][6] · hasta 6 bloques por día</h2><div class='tabla'>
+                <table class='horario'><thead><tr><th>Posición</th>%s</tr></thead><tbody>%s</tbody></table></div></article>
+                """.formatted(opcionesIndice(DIAS), encabezados(DIAS), filas);
     }
 
     static String vistaEstructuras() {
@@ -259,10 +263,30 @@ public class AgendaWeb {
     static double sumarHoras(int i) { return i == cantidad ? 0 : (actividades[i].completada ? 0 : actividades[i].horas) + sumarHoras(i + 1); }
 
     static String guardarBloque(Map<String, String> p) {
-        int d = entero(p.get("dia"), -1), b = entero(p.get("bloque"), -1);
+        int d = entero(p.get("dia"), -1);
         String materia = limpiar(p.get("materia"));
-        if (d < 0 || d >= 5 || b < 0 || b >= 6 || materia.length() < 2) return "Datos de horario inválidos.";
-        horarios[d][b] = new Horario(materia, d, b);
+        if (d < 0 || d >= 5 || materia.length() < 2) return "Datos de horario inválidos.";
+
+        LocalTime inicio, fin;
+        try {
+            inicio = LocalTime.parse(p.getOrDefault("inicio", ""));
+            fin = LocalTime.parse(p.getOrDefault("fin", ""));
+        } catch (Exception error) {
+            return "Escribe una hora inicial y una hora final válidas.";
+        }
+        if (!fin.isAfter(inicio)) return "La hora final debe ser posterior a la hora inicial.";
+
+        for (Horario existente : horarios[d]) {
+            if (existente != null && seCruzan(inicio, fin, existente.inicio, existente.fin))
+                return "Horario no disponible. Debes quitar primero el bloque ocupado.";
+        }
+
+        int b = -1;
+        for (int i = 0; i < horarios[d].length; i++) if (horarios[d][i] == null) { b = i; break; }
+        if (b < 0) return "No hay posiciones disponibles para ese día. Debes quitar un bloque primero.";
+
+        horarios[d][b] = new Horario(materia, d, b, inicio, fin);
+        ordenarHorariosDia(d);
         guardarHorarios();
         return "Bloque guardado.";
     }
@@ -270,9 +294,27 @@ public class AgendaWeb {
     static String eliminarBloque(Map<String, String> p) {
         int d = entero(p.get("dia"), -1), b = entero(p.get("bloque"), -1);
         if (d < 0 || d >= 5 || b < 0 || b >= 6) return "Bloque inexistente.";
+        if (horarios[d][b] == null) return "Ese bloque ya está disponible.";
         horarios[d][b] = null;
+        ordenarHorariosDia(d);
         guardarHorarios();
         return "Bloque eliminado.";
+    }
+
+    static boolean seCruzan(LocalTime inicioA, LocalTime finA, LocalTime inicioB, LocalTime finB) {
+        return inicioA.isBefore(finB) && finA.isAfter(inicioB);
+    }
+
+    static void ordenarHorariosDia(int dia) {
+        for (int i = 0; i < horarios[dia].length; i++) {
+            int menor = -1;
+            for (int j = i; j < horarios[dia].length; j++)
+                if (horarios[dia][j] != null && (menor < 0 || horarios[dia][j].inicio.isBefore(horarios[dia][menor].inicio)))
+                    menor = j;
+            if (menor < 0) break;
+            Horario temporal = horarios[dia][i]; horarios[dia][i] = horarios[dia][menor]; horarios[dia][menor] = temporal;
+        }
+        for (int i = 0; i < horarios[dia].length; i++) if (horarios[dia][i] != null) horarios[dia][i].bloque = i;
     }
 
     static int contarBloques() {
@@ -336,7 +378,8 @@ public class AgendaWeb {
         DATOS.mkdirs();
         try (BufferedWriter w = new BufferedWriter(new FileWriter(ARCHIVO_H, StandardCharsets.UTF_8, false))) {
             for (int d = 0; d < 5; d++) for (int b = 0; b < 6; b++) if (horarios[d][b] != null) {
-                w.write(d + ";" + b + ";" + horarios[d][b].materia); w.newLine();
+                Horario h = horarios[d][b];
+                w.write(d + ";" + b + ";" + h.inicio + ";" + h.fin + ";" + h.materia); w.newLine();
             }
         } catch (IOException ignored) { }
     }
@@ -353,15 +396,25 @@ public class AgendaWeb {
         if (ARCHIVO_H.exists()) try (BufferedReader r = new BufferedReader(new FileReader(ARCHIVO_H, StandardCharsets.UTF_8))) {
             String linea;
             while ((linea = r.readLine()) != null) {
-                String[] d = linea.split(";");
-                if (d.length == 3) { int dia = Integer.parseInt(d[0]), b = Integer.parseInt(d[1]); horarios[dia][b] = new Horario(d[2], dia, b); }
+                String[] d = linea.split(";", 5);
+                int dia = Integer.parseInt(d[0]), b = Integer.parseInt(d[1]);
+                if (dia < 0 || dia >= 5 || b < 0 || b >= 6) continue;
+                if (d.length == 5) {
+                    horarios[dia][b] = new Horario(d[4], dia, b, LocalTime.parse(d[2]), LocalTime.parse(d[3]));
+                } else if (d.length == 3) {
+                    String[] horasAnteriores = BLOQUES_ANTERIORES[b].split("-");
+                    horarios[dia][b] = new Horario(d[2], dia, b,
+                            LocalTime.parse(horasAnteriores[0]), LocalTime.parse(horasAnteriores[1]));
+                }
             }
+            for (int dia = 0; dia < 5; dia++) ordenarHorariosDia(dia);
         } catch (Exception ignored) { }
         if (cantidad == 0) {
             actividades[cantidad++] = new Actividad("Proyecto de Programación", LocalDate.now().plusDays(4).toString(), "Alta", 3, false);
             actividades[cantidad++] = new Actividad("Taller de Cálculo", LocalDate.now().plusDays(7).toString(), "Media", 2, false);
             actividades[cantidad++] = new Actividad("Exposición de Sistemas", LocalDate.now().plusDays(10).toString(), "Alta", 2.5, false);
-            horarios[0][0] = new Horario("Programación II", 0, 0); horarios[2][2] = new Horario("Álgebra", 2, 2);
+            horarios[0][0] = new Horario("Programación II", 0, 0, LocalTime.of(7, 0), LocalTime.of(8, 0));
+            horarios[2][0] = new Horario("Álgebra", 2, 0, LocalTime.of(9, 0), LocalTime.of(10, 0));
             guardarActividades(); guardarHorarios();
         }
     }
@@ -411,7 +464,12 @@ public class AgendaWeb {
         String nombre, fecha, prioridad; double horas; boolean completada;
         Actividad(String n, String f, String p, double h, boolean c) { nombre = n; fecha = f; prioridad = p; horas = h; completada = c; }
     }
-    static class Horario { String materia; int dia, bloque; Horario(String m, int d, int b) { materia = m; dia = d; bloque = b; } }
+    static class Horario {
+        String materia; int dia, bloque; LocalTime inicio, fin;
+        Horario(String m, int d, int b, LocalTime i, LocalTime f) {
+            materia = m; dia = d; bloque = b; inicio = i; fin = f;
+        }
+    }
     static class Nodo { Actividad a; Nodo siguiente; Nodo(Actividad a) { this.a = a; } }
     static class NodoCircular { String mensaje; NodoCircular siguiente; NodoCircular(String m) { mensaje = m; } }
     static class NodoArbol { Actividad a; NodoArbol izquierda, derecha; NodoArbol(Actividad a) { this.a = a; } }
